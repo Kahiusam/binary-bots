@@ -1,0 +1,118 @@
+import requests
+import time
+
+# Constants and Configuration
+API_URL = "https://api.binary.com/v3"  # Replace with actual API endpoint
+API_TOKEN = "YOUR_API_KEY_HERE"       # Replace with your Binary API key
+VOLATILITY_INDEX = "R_100"            # Change to R_10 for Volatility 10 Index
+TAKE_PROFIT = 10                      # Target profit in account currency
+STOP_LOSS = -10                       # Maximum acceptable loss
+INITIAL_STAKE = 1                     # Starting stake amount
+MARTINGALE_MULTIPLIER = 2             # Martingale multiplier
+PREDICTION_DIGIT = 2                  # Default prediction digit for the trade
+MIN_TICKS_TO_ANALYZE = 50             # Number of ticks to analyze for digit frequency
+
+# Initialize variables
+current_stake = INITIAL_STAKE
+total_profit = 0
+trade_count = 0
+current_loss = 0
+
+
+def get_ticks(index, count=1):
+    """Fetch the latest tick data."""
+    endpoint = f"{API_URL}/ticks/{index}?count={count}"
+    headers = {"Authorization": f"Bearer {API_TOKEN}"}
+    response = requests.get(endpoint, headers=headers)
+    if response.status_code == 200:
+        return response.json().get("ticks", [])
+    else:
+        raise Exception(f"Error fetching ticks: {response.text}")
+
+
+def analyze_digits(ticks):
+    """Analyze digit frequency from tick prices."""
+    digits = [int(str(tick["price"])[-1]) for tick in ticks]
+    digit_counts = {i: digits.count(i) for i in range(10)}
+    least_appearing = min(digit_counts, key=digit_counts.get)
+    most_appearing = max(digit_counts, key=digit_counts.get)
+    return least_appearing, most_appearing
+
+
+def place_trade(index, stake, prediction, contract_type):
+    """Place a binary trade (match or differ)."""
+    trade_payload = {
+        "stake": stake,
+        "contract_type": contract_type,  # "DIGITMATCH" for matches
+        "duration": 1,                  # Tick duration
+        "duration_unit": "t",
+        "symbol": index,
+        "prediction": prediction,
+    }
+    endpoint = f"{API_URL}/trades"
+    headers = {"Authorization": f"Bearer {API_TOKEN}"}
+    response = requests.post(endpoint, json=trade_payload, headers=headers)
+    if response.status_code == 200:
+        return response.json()
+    else:
+        raise Exception(f"Error placing trade: {response.text}")
+
+
+def handle_trade_result(result):
+    """Handle trade result: win or lose."""
+    global current_stake, total_profit, trade_count, current_loss
+
+    trade_payout = result.get("payout", 0)
+    trade_profit = result.get("profit", 0)
+
+    # Update stats
+    total_profit += trade_profit
+    trade_count += 1
+    current_loss = 0 if trade_profit > 0 else current_stake
+
+    # Adjust stake for Martingale
+    if trade_profit <= 0:  # Loss
+        current_stake *= MARTINGALE_MULTIPLIER
+    else:  # Win
+        current_stake = INITIAL_STAKE
+
+    return trade_profit > 0
+
+
+# Main Trading Loop
+try:
+    while True:
+        # Fetch recent ticks
+        ticks = get_ticks(VOLATILITY_INDEX, MIN_TICKS_TO_ANALYZE)
+        if not ticks:
+            print("No ticks available. Retrying...")
+            time.sleep(1)
+            continue
+
+        # Analyze digits
+        least_appearing, most_appearing = analyze_digits(ticks)
+
+        # Trading logic for Volatility 100 Index
+        prediction = most_appearing if VOLATILITY_INDEX == "R_100" else least_appearing
+        contract_type = "DIGITOVER" if most_appearing in [8, 9] else "DIGITUNDER"
+
+        # Place trade
+        print(f"Placing trade: {contract_type}, Prediction: {prediction}, Stake: {current_stake}")
+        trade_result = place_trade(VOLATILITY_INDEX, current_stake, prediction, contract_type)
+        win = handle_trade_result(trade_result)
+
+        # Check Take Profit and Stop Loss
+        if total_profit >= TAKE_PROFIT:
+            print("Take profit reached. Stopping the bot.")
+            break
+        elif total_profit <= STOP_LOSS:
+            print("Stop loss reached. Stopping the bot.")
+            break
+
+        # Wait for the next tick
+        time.sleep(1)
+
+except KeyboardInterrupt:
+    print("Bot stopped manually.")
+except Exception as e:
+    print(f"An error occurred: {e}")
